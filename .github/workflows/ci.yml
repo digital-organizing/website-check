@@ -14,6 +14,8 @@ jobs:
         run: |
           pip install playwright requests pillow
           python -m playwright install --with-deps chromium firefox webkit
+      - name: SKILL.md-Frontmatter (claude.ai-Limits)
+        run: python tools/check_skill.py
       - name: Syntax
         run: python -m py_compile skills/website-check/scripts/*.py
       - name: Browsertest gegen lokale Testseite
