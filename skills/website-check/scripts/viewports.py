@@ -2,7 +2,7 @@
 """Render every crawled page at every configured viewport.
 
 Usage: python viewports.py WORKDIR [--time-budget SECONDS]
-Per page × viewport: horizontal overflow (+ offending elements), navigation reachable
+Per page × viewport (after scrolling once to the bottom, for lazy loading): horizontal overflow (+ offending elements), navigation reachable
 (opens burger menus), broken images, full-page screenshot (JPEG).
 Writes WORKDIR/viewports/<id>_<viewport>.json and WORKDIR/screens/<id>_<viewport>.jpg. Resumable.
 """
@@ -14,7 +14,7 @@ import time
 
 from playwright.sync_api import sync_playwright
 
-from common import UA, load_json, save_json, launch_browser
+from common import UA, load_json, save_json, launch_browser, scroll_through
 
 COOKIE_JS = r"""() => {
   const re = /^(alle\s+)?(cookies\s+)?(akzeptieren|annehmen|zulassen|zustimmen|einverstanden|verstanden|ok|accept( all)?( cookies)?|allow all|tout accepter|accepter( et fermer)?|j'accepte|accetta( tutti)?|accetto|d'accordo)$/i;
@@ -108,6 +108,7 @@ def main():
                         rec["cookie_banner"] = page.evaluate(COOKIE_JS)
                         cookie_done.add(host)
                         page.wait_for_timeout(600)
+                    scroll_through(page)  # lazy images/iframes (e.g. social icons in the footer) have width 0 before
                     rec.update(page.evaluate(MEASURE, vp["width"]))
                     shot = os.path.join(wd, "screens", f"{fid(p['url'])}_{vp['name']}.jpg")
                     page.screenshot(path=shot, full_page=True, type="jpeg", quality=45, timeout=30000)

@@ -19,6 +19,7 @@ import requests
 from common import (UA, LangMap, load_json, save_json, normalize, bare_host, detect_lang,
                     foreign_strength, label_lang)
 from preflight import probe
+from forms import STAGING
 
 LANG_NAME = {"de": "DE", "fr": "FR", "it": "IT", "en": "EN", "rm": "RM"}
 IMPRESSUM = re.compile(r"impressum|imprint|mentions[-_ ]?l[ée]gales|colophon|note[-_ ]legali|legal[-_ ]notice", re.I)
@@ -48,6 +49,77 @@ class Findings:
 
     def sorted(self):
         return sorted(self.items.values(), key=lambda f: (SEV_ORDER[f["sev"]], f["cat"], -len(f["pages"]), f["title"]))
+
+
+def browser_findings(wd, F, pages, lm):
+    """Category «Browser»: a check that fails in some engines but not in others. Fails everywhere on one
+    device class → not browser-specific: reported under «Darstellung» unless viewports.py already covers it
+    (overflow, images, JS errors). Extra tests (320 px, dark mode, zoom …) are reported per condition."""
+    from browsers import CHECKS, problems
+    data = load_json(os.path.join(wd, "browsers.json"))
+    if not data or not data.get("results"):
+        return None
+    combos = {c["id"]: c for c in data["meta"]["combos"]}
+    by_url = defaultdict(dict)
+    for r in data["results"]:
+        by_url[r["url"]][r["combo"]] = r
+    matrix = {}
+    for url, recs in by_url.items():
+        L = (pages.get(url) or {}).get("lang_cfg") or lm.lang_of(url)
+        base = recs.get("chrome-android")
+        probs = {cid: problems(r, base) for cid, r in recs.items()}
+        matrix[url] = {cid: sorted(p) for cid, p in probs.items()}
+        std = [cid for cid in recs if combos.get(cid, {}).get("group") == "standard"]
+        for key, (label, sev, covered) in CHECKS.items():
+            # standard combinations: compare engines per device class
+            tested = [c for c in std if key in applicable(recs[c], key)]
+            failing = [c for c in tested if key in probs[c]]
+            if failing:
+                classes = {combos[c]["device"] for c in failing}
+                general = all({c for c in tested if combos[c]["device"] == k} <= set(failing) for k in classes)
+                names = ", ".join(combos[c]["label"] for c in failing)
+                ev = [f"{combos[c]['label']}: {probs[c][key]}" for c in failing]
+                shot = recs[failing[0]].get("screenshot")
+                if not general:
+                    F.add(sev, "Browser", f"{label} – nur {names}", "", lang=L, url=url, evidence=ev, screenshot=shot)
+                elif not covered:
+                    where = "allen Browsern" if len(set(failing)) == len(tested) else \
+                        f"allen Browsern auf {'/'.join(sorted({'desktop': 'Desktop', 'mobile': 'Mobile', 'tablet': 'Tablet'}[k] for k in classes))}"
+                    F.add(sev, "Darstellung", f"{label} (in {where})", "", lang=L, url=url, evidence=ev, screenshot=shot)
+            # extra conditions: each one on its own (no engine comparison)
+            for c in recs:
+                g = combos.get(c, {}).get("group")
+                if g in (None, "standard") or key not in probs[c]:
+                    continue
+                if covered and key != "overflow":
+                    continue
+                if key in std_fail_keys(probs, std):
+                    continue  # already reported via the standard combinations
+                # rare conditions weigh less: in-app UA/zoom → hint, very small screens/dark mode → at most «mittel»
+                sev_x = "hinweis" if g in ("inapp", "zoom") and key not in ("load", "form") else \
+                    "mittel" if sev == "kritisch" and g in ("small", "dark") and key not in ("load", "form") else sev
+                F.add(sev_x, "Browser", f"{label} – {combos[c]['label']}", "", lang=L, url=url,
+                      evidence=[f"{combos[c]['label']}: {probs[c][key]}"], screenshot=recs[c].get("screenshot"))
+    data["matrix"] = matrix
+    return data
+
+
+def applicable(rec, key):
+    """Checks that make sense for this record (no form on the page → no form checks)."""
+    keys = {"load", "js", "overflow", "images", "fonts", "h1", "clipped", "contrast", "slow"}
+    if (rec.get("langswitch") or {}).get("found"):
+        keys.add("langswitch")
+    if rec.get("form"):
+        keys |= {"form", "form_typing", "form_button"}
+    if rec.get("accordion"):
+        keys.add("accordion")
+    if rec.get("share"):
+        keys.add("share")
+    return keys
+
+
+def std_fail_keys(probs, std):
+    return {k for c in std for k in probs.get(c, {})}
 
 
 def main(wd):
@@ -104,6 +176,8 @@ def main(wd):
                           url=u, evidence=[f"Linktext «{label}» auf {u}"])
                 elif r["result"] == "kaputt":
                     pass  # internal page errors are reported in section 1 with all sources
+                elif r.get("note"):
+                    F.add("hinweis", "Links", r["note"], key, lang=p["lang_cfg"], url=u, evidence=[f"Linktext «{label}»"])
                 elif r["result"] == "umleitung" and lm.is_internal(key):
                     F.add("hinweis", "Links", "Interner Link mit Weiterleitung", f"{key} {r.get('detail', '')}",
                           lang=p["lang_cfg"], url=u)
@@ -451,6 +525,23 @@ def main(wd):
     for it in inv:
         r = fres.get(it["id"])
         it["result"] = r
+        if it.get("closed"):
+            F.add("kritisch", "Formulare", "Eingebettetes Formular ist geschlossen (nimmt keine Einträge an)",
+                  f"{it.get('provider', '')} «{it.get('form_name', '')}»", lang=it["lang"], pages=it["pages"][:30], merge=False)
+        for ext in it.get("redirects_external", []):
+            h = urlsplit(ext).hostname or ""
+            staging = re.search(STAGING, h)
+            F.add("mittel", "Formulare", f"Formular leitet nach dem Absenden auf {'eine Staging-Domain' if staging else 'eine fremde Domain'} weiter ({h})",
+                  "Aus der Formular-Konfiguration gelesen (Standardwert). Prüfen, ob die Formular-Logik ihn überschreibt – "
+                  "sonst landen Unterzeichnende nach dem Absenden auf dieser Adresse."
+                  + (f" Die Live-Seite existiert: {', '.join(x for x in it.get('thank_you_live', []) if normalize(x) in pages)}."
+                     if any(normalize(x) in pages for x in it.get("thank_you_live", [])) else ""),
+                  lang=it["lang"], pages=it["pages"][:30], evidence=[f"{it.get('provider', 'Formular')} «{it.get('form_name', '')}»: {ext}"])
+        fl = (it.get("form_language") or "").split("-")[0].lower()
+        if multi and fl and it["lang"] and fl != it["lang"] and fl in langs:
+            F.add("mittel", "Übersetzung", f"Formular-Sprache ist {LANG_NAME.get(fl, fl)} (Fehlermeldungen, Pflichtfeld-Hinweise)",
+                  f"{it.get('provider', '')} «{it.get('form_name', '')}» ist auf einer {LANG_NAME.get(it['lang'])}-Seite eingebettet",
+                  lang=it["lang"], pages=it["pages"][:30])
         if not it["submit"]:
             continue
         if not r:
@@ -492,6 +583,9 @@ def main(wd):
             F.add("hinweis", "Teilen-Links", f"Teilen-Buttons fehlen, die es in einer anderen Sprache gibt: {', '.join(missing)}",
                   "", lang=L, pages=by_lang[L][:1])
 
+    # ------------------------------------------------ 10b. browsers and devices (browsers.py)
+    browsers = browser_findings(wd, F, pages, lm)
+
     # ------------------------------------------------ 11. sitemap coverage
     sm = set(st.get("sitemap", []))
     if sm:
@@ -526,7 +620,7 @@ def main(wd):
         "render_degraded": render_degraded, "blocked_resource_hosts": blocked_res,
         "unverifiable": {k: sorted(set(v)) for k, v in unverifiable.items()},
         "groups": groups, "legal": legal, "og_table": og_table, "forms": inv,
-        "viewport_summary": vp_summary, "findings": findings, "share": share,
+        "viewport_summary": vp_summary, "findings": findings, "share": share, "browsers": browsers,
         "suppressed": len(review.get("suppress", [])),
     }
     save_json(os.path.join(wd, "findings.json"), out)

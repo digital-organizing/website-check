@@ -73,7 +73,9 @@ EXTRACT = r"""() => {
       captcha: /recaptcha|hcaptcha|turnstile|friendly-captcha|frc-captcha/.test(html + document.head.innerHTML.toLowerCase()),
       role: f.getAttribute('role') || '', cls: (f.className || '').toString().slice(0, 80)});
   });
-  document.querySelectorAll('iframe').forEach(f => out.iframes.push(f.src || ''));
+  // lazy embeds (Tally: data-tally-src, loading=lazy) have no src until scrolled into view
+  document.querySelectorAll('iframe').forEach(f => out.iframes.push(f.src && f.src !== 'about:blank' ? f.src
+      : (f.getAttribute('data-tally-src') || f.getAttribute('data-src') || '')));
   // text blocks: leaf-ish block elements, textContent so hidden menus/accordions are included
   const seen = new Set();
   const SKIP = /^(SCRIPT|STYLE|NOSCRIPT|SVG|CODE|PRE|HTML|HEAD|BODY|TEMPLATE)$/;

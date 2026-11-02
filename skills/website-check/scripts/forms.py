@@ -78,8 +78,18 @@ def inventory(wd):
     extra = []
     for it in items.values():
         if it["kind"] == "iframe":
-            it["redirects"] = embedded_redirects(it["frame_src"], lm)
+            conf = tally_config(it["frame_src"], lm) if "tally.so" in it["frame_src"] else None
+            if conf:
+                it.update(conf)
+            else:
+                it["redirects"] = embedded_redirects(it["frame_src"], lm)
             extra += [(u, f"Im eingebetteten Formular hinterlegt ({it['frame_src'].split('?')[0]})") for u in it["redirects"]]
+            # redirect to a staging copy (solidar.webflow.io/de/danke): queue the live counterpart, it is the real thank-you page
+            for u in it.get("redirects_external", []):
+                if re.search(STAGING, urlsplit(u).hostname or ""):
+                    live = f"{urlsplit(it['pages'][0]).scheme}://{urlsplit(it['pages'][0]).netloc}{urlsplit(u).path}"
+                    extra.append((live, f"Live-Pendant der Staging-Weiterleitung {u}"))
+                    it.setdefault("thank_you_live", []).append(live)
     for it in items.values():
         it["pages"] = sorted(set(it["pages"]), key=len)
         it["test_page"] = it["pages"][0]
@@ -92,8 +102,14 @@ def inventory(wd):
     for it in out:
         print(f"  [{it['id']}] {it['lang']} {it['type']:22} {'abschicken' if it['submit'] else 'NICHT abschicken':17} "
               f"{it['test_page']}  (auf {len(it['pages'])} Seiten){'  CAPTCHA' if it['captcha'] else ''}")
+        if it.get("provider") == "Tally":
+            vis = [f.get("placeholder") or f.get("label") or f["type"] for f in it["fields"]]
+            print(f"      Tally «{it.get('form_name', '')}»: {len(vis)} sichtbare Felder ({', '.join(vis[:8])})"
+                  f"{'  GESCHLOSSEN' if it.get('closed') else ''}{'  Teil-Antworten aktiv' if it.get('partial_submissions') else ''}")
         for u in it.get("redirects", []):
             print(f"      leitet evtl. weiter auf {u}")
+        for u in it.get("redirects_external", []):
+            print(f"      leitet evtl. weiter auf FREMDE Domain {u}")
     queue_urls(wd, extra, "In eingebetteten Formularen hinterlegte Seiten (z.B. Danke-Seiten)")
 
 
@@ -300,6 +316,69 @@ def queue_thank_you_pages(wd, results):
     queue_urls(wd, [(r["final_url"], f"Nach Absenden von {r['page']}") for r in results.values()
                     if r.get("url_changed") and r.get("final_url") and lm.is_internal(r["final_url"])],
                "Neue Seiten nach dem Absenden (z.B. Danke-Seiten)")
+
+
+STAGING = r"\.(webflow\.io|netlify\.app|vercel\.app|pages\.dev|wpengine\.com|wpenginepowered\.com)$|^(staging|stage|dev|test)\."
+
+TALLY_FIELDS = {"INPUT_TEXT": "text", "INPUT_EMAIL": "email", "INPUT_PHONE_NUMBER": "tel", "INPUT_NUMBER": "number",
+                "INPUT_LINK": "url", "INPUT_DATE": "date", "INPUT_TIME": "time", "TEXTAREA": "textarea",
+                "DROPDOWN_OPTION": "select", "MULTI_SELECT_OPTION": "select", "CHECKBOX": "checkbox",
+                "MULTIPLE_CHOICE_OPTION": "radio", "FILE_UPLOAD": "file", "SIGNATURE": "signature",
+                "PAYMENT": "payment", "RATING": "rating", "LINEAR_SCALE": "scale", "RANKING_OPTION": "ranking"}
+
+
+def tally_config(src, lm):
+    """Tally renders its forms from JSON (__NEXT_DATA__) that is already in the HTML of tally.so/r/<id>:
+    visible fields, closed state, partial submissions and the redirect after submitting – no browser needed.
+    The redirect is often a calculated field («redirect-url») whose default sometimes still points to a
+    staging domain (*.webflow.io) – reported as redirects_external."""
+    import json
+    m = re.search(r"tally\.so/(?:embed|r|forms)/(\w+)", src)
+    if not m:
+        return None
+    try:
+        r = requests.get(f"https://tally.so/r/{m.group(1)}", headers={"User-Agent": UA}, timeout=20)
+        d = json.loads(re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.S).group(1))
+        pp = d["props"]["pageProps"]
+        blocks = pp["blocks"]
+    except Exception:
+        return None
+    fields, seen_groups = [], set()
+    last_title = ""  # TITLE/LABEL blocks precede their input
+    for b in blocks:
+        pl = b.get("payload") or {}
+        if b["type"] in ("TITLE", "LABEL"):
+            last_title = re.sub(r"\s+", " ", " ".join(x[0] for x in pl.get("safeHTMLSchema", []) if x and isinstance(x[0], str)))[:120]
+            continue
+        typ = TALLY_FIELDS.get(b["type"])
+        if not typ:
+            continue
+        if pl.get("isHidden"):
+            last_title = ""
+            continue
+        grp = b.get("groupUuid") or b.get("uuid")
+        if typ in ("select", "radio", "ranking") and grp in seen_groups:
+            continue  # one entry per dropdown, not per option
+        seen_groups.add(grp)
+        fields.append({"tag": "textarea" if typ == "textarea" else "select" if typ == "select" else "input",
+                       "type": typ, "name": pl.get("name", ""), "id": "", "label": (pl.get("text") if typ == "checkbox" else last_title or "")[:150],
+                       "placeholder": pl.get("placeholder", "") or "", "required": bool(pl.get("isRequired")), "options": 0})
+        last_title = ""
+    st = pp.get("settings") or {}
+    raw = json.dumps(st.get("redirectOnCompletion") or "") if st.get("redirectOnCompletion") else ""
+    if raw:  # literal URL or mention of a calculated/hidden field → collect URLs those fields can hold
+        raw += json.dumps([b for b in blocks if b["type"] in ("CALCULATED_FIELDS", "CONDITIONAL_LOGIC", "HIDDEN_FIELDS")])
+    urls = []
+    for u in re.findall(r"https?://[^\s\"'<>\\]+", raw.replace("\\/", "/")):
+        u = u.rstrip(".,;)")
+        if u not in urls:
+            urls.append(u)
+    payment = any(b["type"] == "PAYMENT" for b in blocks)
+    return {"provider": "Tally", "form_name": pp.get("name", ""), "fields": fields, "closed": bool(pp.get("isClosed") or st.get("isClosed")),
+            "partial_submissions": bool(st.get("hasPartialSubmissions")), "form_language": st.get("language", ""),
+            "redirects": [u for u in urls if lm.is_internal(u)][:20],
+            "redirects_external": [u for u in urls if not lm.is_internal(u)][:20],
+            "type": "Zahlung/Spende" if payment else "Eingebettetes Formular (Tally)"}
 
 
 def embedded_redirects(src, lm):

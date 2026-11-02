@@ -30,6 +30,81 @@ def launch_browser(pw, **kw):
         raise
 
 
+def scroll_through(page, max_steps=40, pause=150):
+    """Scroll to the bottom in viewport-sized steps, then back to the top. Triggers lazy loading
+    (images and iframes with loading="lazy", data-tally-src …) before anything is measured."""
+    try:
+        for _ in range(max_steps):
+            done = page.evaluate("""() => { const h = window.innerHeight || 600;
+                window.scrollBy(0, Math.round(h * 0.9));
+                return window.scrollY + h >= document.documentElement.scrollHeight - 2; }""")
+            page.wait_for_timeout(pause)
+            if done:
+                break
+        try:
+            page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(300)
+    except Exception:
+        pass  # page navigated or closed – the caller measures what is there
+
+
+# ---------------------------------------------------------------- Firefox / WebKit (browsers.py)
+def find_browsers_path(wd=None):
+    """Firefox/WebKit are installed into their own folder so the preinstalled Chromium stays untouched.
+    Point PLAYWRIGHT_BROWSERS_PATH there (must happen before sync_playwright() starts)."""
+    if os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+        return os.environ["PLAYWRIGHT_BROWSERS_PATH"]
+    cands = [os.path.join(wd, "..", "pw-browsers") if wd else "", os.path.expanduser("~/pw-browsers"),
+             os.path.expanduser("~/.cache/ms-playwright")]
+    for c in filter(None, cands):
+        if glob.glob(os.path.join(c, "firefox-*")) or glob.glob(os.path.join(c, "webkit-*")):
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.abspath(c)
+            return os.environ["PLAYWRIGHT_BROWSERS_PATH"]
+    return None
+
+
+def proxy_ca_file():
+    """CA of the sandbox proxy, if there is one (Claude Code on the web, claude.ai)."""
+    for c in (os.environ.get("PROXY_CA", ""), "/root/.ccr/agent-proxy-ca.crt"):
+        if c and os.path.exists(c):
+            return c
+    if os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"):
+        for env in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"):
+            if os.path.exists(os.environ.get(env, "")):
+                return os.environ[env]
+    return None
+
+
+def firefox_profile(base_dir):
+    """Firefox ignores the system certificate store. Behind a TLS-inspecting proxy it therefore needs a
+    profile that trusts the proxy CA (certutil). Never switch off certificate checks instead.
+    Returns the profile directory (empty profile if no proxy CA is needed) or raises RuntimeError."""
+    import shutil
+    import subprocess
+    prof = os.path.join(base_dir, "firefox-profile")
+    ca = proxy_ca_file()
+    if os.path.exists(os.path.join(prof, "cert9.db")) or not ca:
+        os.makedirs(prof, exist_ok=True)
+        return prof
+    if not shutil.which("certutil"):
+        raise RuntimeError("certutil fehlt (apt-get install -y libnss3-tools) – Firefox kann dem Proxy-Zertifikat sonst nicht vertrauen")
+    os.makedirs(prof, exist_ok=True)
+    subprocess.run(["certutil", "-N", "-d", "sql:" + prof, "--empty-password"], check=True, capture_output=True)
+    pem = open(ca, encoding="utf-8", errors="ignore").read()
+    certs = re.findall(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", pem, re.S)
+    for i, c in enumerate(certs[:400]):  # a bundle (SSL_CERT_FILE) holds many certificates; certutil takes one each
+        tmp = os.path.join(prof, "ca.pem")
+        with open(tmp, "w") as f:
+            f.write(c + "\n")
+        subprocess.run(["certutil", "-A", "-n", f"proxy-ca-{i}", "-t", "C,,", "-i", tmp, "-d", "sql:" + prof],
+                       check=True, capture_output=True)
+        os.remove(tmp)
+    return prof
+
+
 def load_json(path, default=None):
     if not os.path.exists(path):
         return default
