@@ -1,0 +1,26 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Abhängigkeiten
+        run: |
+          pip install playwright requests pillow
+          python -m playwright install --with-deps chromium firefox webkit
+      - name: Syntax
+        run: python -m py_compile skills/website-check/scripts/*.py
+      - name: Browsertest gegen lokale Testseite
+        run: python tests/test_browsers.py
+      - name: Skill-Paket bauen
+        run: tools/build_skill.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: website-check-skill
+          path: dist/website-check.zip
