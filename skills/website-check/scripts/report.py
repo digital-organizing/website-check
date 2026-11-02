@@ -2,6 +2,7 @@
 """Render findings.json as a self-contained German HTML report.
 
 Usage: python report.py WORKDIR OUTPUT.html
+       python report.py WORKDIR OUTPUT.pdf --only browser   # only «Browser und Geräte», A4 landscape PDF
 Screenshots referenced by findings are embedded as downscaled JPEG thumbnails.
 """
 import base64
@@ -9,6 +10,7 @@ import datetime
 import hashlib
 import html
 import io
+import argparse
 import os
 import sys
 from collections import Counter, defaultdict
@@ -16,7 +18,7 @@ from collections import Counter, defaultdict
 from common import load_json
 
 SEV_LABEL = {"kritisch": "Kritisch", "mittel": "Mittel", "hinweis": "Hinweis"}
-CATS = ["Links", "Formulare", "Teilen-Links", "Übersetzung", "Sprachversionen", "OG-Tags", "Rechtliches", "Darstellung", "Technik"]
+CATS = ["Links", "Formulare", "Teilen-Links", "Übersetzung", "Sprachversionen", "OG-Tags", "Rechtliches", "Darstellung", "Browser", "Technik"]
 LANG = {"de": "DE", "fr": "FR", "it": "IT", "en": "EN", "rm": "RM"}
 e = html.escape
 
@@ -102,10 +104,17 @@ details>summary{cursor:pointer;color:var(--muted);font-size:.9rem;margin-top:6px
 .tag{display:inline-block;font-size:.78rem;border:1px solid var(--line);border-radius:3px;padding:0 5px;margin-right:4px;color:var(--muted)}
 .okc{color:var(--ok);font-weight:600}.badc{color:var(--crit);font-weight:600}.midc{color:var(--mid);font-weight:600}
 .pagebox{border-top:1px solid var(--line);padding:10px 0}
+table.bm{font-size:.85rem}table.bm td,table.bm th{text-align:center}table.bm td.path,table.bm th.path{text-align:left;white-space:nowrap}
+table.bm th{white-space:normal;min-width:70px;max-width:110px;vertical-align:bottom}table.bm td small{display:block;font-size:.72rem;font-weight:400;max-width:130px}
+@media print{.scroll{overflow:visible}table.bm{font-size:.7rem}}
+.bm .ok{color:var(--ok);font-weight:700}.bm .bad{color:var(--crit);font-weight:700}.bm .na{color:var(--none)}
+.gal{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start;margin:8px 0 24px}
+.gal figure{margin:0;max-width:300px}.gal img{max-width:300px;max-height:330px;border:1px solid var(--line);display:block}
+.gal figcaption{font-size:.78rem;color:var(--muted);margin-top:3px}.gal figcaption.bad{color:var(--crit)}
 .pagebox summary{color:var(--ink);font-weight:600}
 footer{margin-top:60px;color:var(--muted);font-size:.9rem}
 @media (max-width:640px){.wrap{padding:24px 16px}h1{font-size:1.6rem}}
-@media print{.filters{display:none}details{display:block}h2{break-before:page}}
+@media print{.filters{display:none}details{display:block}h2{break-before:page}.only h2{break-before:auto}.gal figure{break-inside:avoid}h3,.gal-title{break-after:avoid}}
 """
 
 JS = """
@@ -153,7 +162,114 @@ def finding_html(f, wd, embed=True):
     return "".join(parts)
 
 
-def main(wd, out_path):
+def browser_section(d, wd):
+    """«Browser und Geräte»: ✓/✗ table page × combination, first-screen screenshots side by side, limits."""
+    from browsers import CHECKS
+    B = d.get("browsers")
+    if not B:
+        return []
+    meta, matrix = B["meta"], B.get("matrix", {})
+    combos = meta["combos"]
+    recs = {(r["url"], r["combo"]): r for r in B["results"]}
+    urls = [u for u in meta["pages"] if any((u, c["id"]) in recs for c in combos)]
+    combos = [c for c in combos if any((u, c["id"]) in recs for u in urls)]
+    H = ["<h2 id='browser'>Browser und Geräte</h2>",
+         "<p>Praktisch alle Browser laufen auf einer von drei Engines: <b>Chromium</b> (Chrome, Edge, Brave, Opera, Samsung Internet), "
+         "<b>Gecko</b> (Firefox) und <b>WebKit</b> (Safari – auf iPhone/iPad auch Chrome und Firefox). "
+         f"Geprüft wurden {len(urls)} Seite{'n' if len(urls) != 1 else ''} in {len(combos)} Kombinationen: lädt, JavaScript-Fehler, "
+         "Überlaufen (auch links abgeschnitten), Bilder, Webfonts, Sprachumschalter, Formular (Felder sichtbar, Eintippen, "
+         "Absende-Button – <b>nichts abgeschickt</b>), Akkordeon, Teilen-Buttons. Befunde in der Kategorie «Browser» nur, "
+         "wenn ein Test in einer Engine scheitert und in den anderen nicht.</p>"]
+    una = meta.get("unavailable") or {}
+    if una:
+        H.append('<div class="warn soft"><strong>Nicht getestet:</strong> ' +
+                 "; ".join(f"{e({'chromium': 'Chromium', 'firefox': 'Firefox', 'webkit': 'Safari/WebKit'}.get(k, k))} – {e(v)}" for k, v in una.items()) +
+                 "</div>")
+    groups = [("Standard", [c for c in combos if c["group"] == "standard"]),
+              ("Zusatztests", [c for c in combos if c["group"] != "standard"])]
+    for gname, gcombos in groups:
+        if not gcombos:
+            continue
+        if gname != "Standard":
+            H.append(f"<h3>{gname}</h3>")
+        H.append('<div class="scroll"><table class="bm"><thead><tr><th class="path">Seite</th>' +
+                 "".join(f"<th>{e(c['label'])}</th>" for c in gcombos) + "</tr></thead><tbody>")
+        for u in urls:
+            H.append(f"<tr><td class='path'><a href='{e(u)}' target=_blank>{e(short(u).split('/', 1)[-1] or short(u))}</a></td>")
+            for c in gcombos:
+                if (u, c["id"]) not in recs:
+                    H.append("<td class='na' title='nicht getestet'>–</td>")
+                    continue
+                bad = matrix.get(u, {}).get(c["id"], [])
+                if bad:
+                    H.append(f"<td class='bad' title='{e(', '.join(CHECKS[k][0] for k in bad))}'>✗<small>{e(', '.join(CHECKS[k][0] for k in bad))}</small></td>")
+                else:
+                    H.append("<td class='ok' title='alle Tests bestanden'>✓</td>")
+            H.append("</tr>")
+        H.append("</tbody></table></div>")
+    if B["results"]:
+        vers = meta.get("versions") or {}
+        if vers:
+            H.append("<p><small>Engines: " + ", ".join(f"{e(k)} {e(str(v))}" for k, v in vers.items() if v) + f" · Stand {e(meta.get('date', ''))}</small></p>")
+    H.append("<h3>Erster Bildschirm pro Gerät</h3><p>Screenshots vom ersten Bildschirm (nicht ganzseitig: schwebende Elemente "
+             "wie Cookie-Banner wären dort an falscher Stelle).</p>")
+    for u in urls[:12]:
+        figs = []
+        for c in combos:
+            r = recs.get((u, c["id"]))
+            if not r or not r.get("screenshot"):
+                continue
+            src = thumb(wd, r["screenshot"], width=300 if c["device"] == "desktop" else 160, max_h=360)
+            bad = matrix.get(u, {}).get(c["id"], [])
+            if src:
+                figs.append(f"<figure><a href='{src}' target=_blank><img src='{src}' alt='{e(c['label'])}' loading='lazy'></a>"
+                            f"<figcaption class='{'bad' if bad else ''}'>{e(c['label'])}{' – ' + e(', '.join(CHECKS[k][0] for k in bad)) if bad else ''}</figcaption></figure>")
+        if figs:
+            H.append(f"<p class='gal-title'><b>{e(short(u))}</b></p><div class='gal'>{''.join(figs)}</div>")
+    if len(urls) > 12:
+        H.append(f"<p>{len(urls) - 12} weitere Seiten ohne Galerie (Tabelle oben).</p>")
+    H.append("<p><small><b>Grenzen:</b> Getestet mit aktuellen Engines und Geräte-Emulation unter Linux. Echte Geräte, ältere Versionen "
+             "(z.B. iOS 15/16), die Bildschirmtastatur über dem Formular und echte App-Browser (Instagram, Facebook …) lassen sich so "
+             "nicht prüfen – dafür braucht es einen Testdienst mit echten Geräten (z.B. BrowserStack) oder einen kurzen Test von Hand "
+             "auf einem iPhone und einem Android-Gerät.</small></p>")
+    return H
+
+
+def write_pdf(html_path, pdf_path):
+    from playwright.sync_api import sync_playwright
+    from common import launch_browser
+    with sync_playwright() as pw:
+        b = launch_browser(pw)
+        pg = b.new_page()
+        pg.goto("file://" + os.path.abspath(html_path), wait_until="load")
+        pg.emulate_media(media="print", color_scheme="light")
+        pg.pdf(path=pdf_path, format="A4", landscape=True, print_background=True,
+               margin={"top": "12mm", "bottom": "12mm", "left": "10mm", "right": "10mm"})
+        b.close()
+
+
+def main(wd, out_path, only=None):
+    if out_path.lower().endswith(".pdf"):
+        html_path = out_path[:-4] + ".html"
+        main(wd, html_path, only)
+        write_pdf(html_path, out_path)
+        print(f"PDF → {out_path} ({os.path.getsize(out_path) // 1024} KB)")
+        return
+    if only == "browser":
+        d = load_json(os.path.join(wd, "findings.json"))
+        today = datetime.date.today().strftime("%d.%m.%Y")
+        F = [f for f in d["findings"] if f["cat"] == "Browser"]
+        H = [f"""<!doctype html><html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Browsertest {e(d['site'])} – {today}</title>
+<style>{CSS}</style></head><body class="only"><div class="wrap"><h1>Browser und Geräte: {e(d['site'])}</h1>
+<p class="lead">Stand {today}</p>"""]
+        H += browser_section(d, wd)
+        H.append("<h3>Befunde «Browser»</h3>" + ("".join(finding_html(f, wd, embed=False) for f in F) or "<p class='okc'>Keine browserspezifischen Befunde.</p>"))
+        H.append(f"<footer>Website-Check von digital/organizing, erstellt am {today}</footer></div></body></html>")
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(H))
+        print(f"Bericht (nur Browser) → {out_path} ({os.path.getsize(out_path) // 1024} KB)")
+        return
     d = load_json(os.path.join(wd, "findings.json"))
     F = d["findings"]
     langs = d["languages"]
@@ -172,7 +288,10 @@ def main(wd, out_path):
     H.append(f"<h1>Website-Check {e(d['site'])}</h1>")
     lead = (f"<strong>{d['pages_html']} Seiten</strong> in <strong>{len(langs)} Sprache{'n' if len(langs) > 1 else ''}</strong> "
             f"({', '.join(LANG.get(l, l) + ': ' + str(d['pages_per_lang'].get(l, 0)) for l in langs)}) geprüft, "
-            f"je in {len(d['viewports'])} Bildschirmgrössen. Stand {today}.")
+            f"je in {len(d['viewports'])} Bildschirmgrössen"
+            + (f", dazu {len((d.get('browsers') or {}).get('meta', {}).get('pages', []))} Seiten in "
+               f"{len(d['browsers']['meta']['combos'])} Browser-/Geräte-Kombinationen" if d.get("browsers") else "")
+            + f". Stand {today}.")
     H.append(f'<p class="lead">{lead}</p>')
     H.append(f'<div class="totals"><div class="k"><b>{c["kritisch"]}</b>kritisch</div><div class="m"><b>{c["mittel"]}</b>mittel</div>'
              f'<div class="h"><b>{c["hinweis"]}</b>Hinweise</div></div>')
@@ -250,8 +369,12 @@ def main(wd, out_path):
     if not forms:
         H.append("<p>Keine Formulare gefunden.</p>")
     else:
-        H.append("<p>Testeinträge wurden mit hallo@digitalorganizing.ch und dem Namen «Test d/o Website-Check» abgeschickt "
-                 "und können beim Kunden gelöscht werden.</p>")
+        sent = [it for it in forms if it.get("result")]
+        if sent:
+            H.append(f"<p>{len(sent)} Testeintr{'äge wurden' if len(sent) != 1 else 'ag wurde'} mit hallo@digitalorganizing.ch und dem "
+                     "Namen «Test d/o Website-Check» abgeschickt und k" + ("önnen" if len(sent) != 1 else "ann") + " beim Kunden gelöscht werden.</p>")
+        else:
+            H.append("<p>Auf Wunsch keine Testeinträge abgeschickt – geprüft wurden nur Aufbau, Felder und hinterlegte Weiterleitungen.</p>")
         H.append('<div class="scroll"><table><thead><tr><th>Sprache</th><th>Typ</th><th>Testseite</th><th>Vorkommen</th><th>Ergebnis</th></tr></thead><tbody>')
         for it in forms:
             r = it.get("result") or {}
@@ -308,6 +431,8 @@ def main(wd, out_path):
                      f"<td><small>{'<hr>'.join(pv_cells) or '–'}</small></td><td>{res}</td></tr>")
         H.append("</tbody></table></div>")
 
+    H.extend(browser_section(d, wd))
+
     # ------------------------------------------------ OG table
     H.append("<h2 id='og'>OG-Tags pro Seite</h2>")
     H.append('<details><summary>Tabelle mit allen OG-Werten anzeigen</summary><div class="scroll"><table><thead><tr>'
@@ -362,4 +487,9 @@ def main(wd, out_path):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    ap = argparse.ArgumentParser()
+    ap.add_argument("workdir")
+    ap.add_argument("output", help=".html oder .pdf")
+    ap.add_argument("--only", choices=["browser"], default=None)
+    a = ap.parse_args()
+    main(a.workdir, a.output, a.only)

@@ -1,6 +1,6 @@
 ---
 name: website-check
-description: Gründlicher QA-Check einer (mehrsprachigen) Website mit HTML-Bericht auf Deutsch – defekte Links, nicht funktionierende Formulare (echte Testeinträge), vergessene Übersetzungen (meist DE→FR), OG-Tags pro Sprache, Teilen-Buttons (WhatsApp, Telegram, Facebook, LinkedIn, E-Mail … inkl. Link-Vorschau und Danke-Seiten), Impressum/Datenschutz und Darstellung auf Mobile/Tablet/Desktop, als Matrix Seite × Sprache. Verwende diesen Skill immer, wenn jemand eine Website prüfen, testen, abnehmen oder vor dem Go-live kontrollieren will – auch bei Formulierungen wie «schau mal ob auf der Seite alles funktioniert», «Website-Abnahme», «Link-Check», «sind alle Übersetzungen drin», «check die FR-Version», «funktionieren die Formulare», «OG-Tags prüfen», «funktionieren die Teilen-Buttons», «Share-Links prüfen», «QA vor Launch» oder wenn nur eine URL mit der Bitte um Kontrolle kommt.
+description: Gründlicher QA-Check einer (mehrsprachigen) Website mit HTML-Bericht auf Deutsch – defekte Links, nicht funktionierende Formulare (echte Testeinträge), vergessene Übersetzungen (meist DE→FR), OG-Tags pro Sprache, Teilen-Buttons (WhatsApp, Telegram, Facebook, LinkedIn, E-Mail … inkl. Link-Vorschau und Danke-Seiten), Impressum/Datenschutz und Darstellung auf Mobile/Tablet/Desktop, Browser-Kompatibilität (Chrome/Edge, Firefox, Safari – Desktop, Android, iPhone/iPad), als Matrix Seite × Sprache. Verwende diesen Skill immer, wenn jemand eine Website prüfen, testen, abnehmen oder vor dem Go-live kontrollieren will – auch bei Formulierungen wie «schau mal ob auf der Seite alles funktioniert», «Website-Abnahme», «Link-Check», «sind alle Übersetzungen drin», «check die FR-Version», «funktionieren die Formulare», «OG-Tags prüfen», «funktionieren die Teilen-Buttons», «Share-Links prüfen», «läuft die Seite auf allen Browsern», «Browser-Test», «geht das auf dem iPhone / in Safari / in Firefox», «auf Handy testen», «QA vor Launch» oder wenn nur eine URL mit der Bitte um Kontrolle kommt.
 ---
 
 # Website-Check
@@ -22,6 +22,7 @@ Titel, FR-Teilen-Text auf Deutsch).
 1. Sprachen erkennen → Vorschlag dem User bestätigen lassen (STOPP)
 2. Crawl            → alle Seiten, alle Sprachen (Hintergrund)
 3. Links + Darstellung
+3b. Browser + Geräte → Chromium, Firefox, WebKit × Desktop/Mobile (Hintergrund)
 4. Formulare        → Liste zeigen, OK abholen (STOPP), dann echt abschicken
    → Danke-Seiten nachcrawlen
 4b. Teilen-Links    → Text, Ziel, Link-Vorschau
@@ -37,6 +38,25 @@ Voraussetzungen: Python 3 mit `playwright` (Chromium), `requests`, `Pillow`. Lok
 `pip install playwright requests pillow && playwright install chromium`. Ist schon ein Chromium vorinstalliert
 (z.B. Claude Code im Web unter `/opt/pw-browsers`), **nicht** `playwright install` ausführen: Die Skripte nehmen
 bei Versionskonflikt automatisch das vorhandene Chromium (`CHROMIUM_PATH` überschreibt die Suche).
+
+- Fehlt das Python-Paket `playwright` (Claude Code im Web hat nur die Node-Version), mit der **gleichen Version**
+  wie das vorinstallierte Node-Playwright installieren (`npm ls -g playwright` → z.B. `pip install playwright==1.63.0`),
+  sonst passt es nicht zum vorhandenen Chromium. `preflight.py` gibt den passenden Befehl aus.
+- **Für den Browsertest (3b)** zusätzlich Firefox und WebKit, **in einen eigenen Ordner**, damit das vorinstallierte
+  Chromium unangetastet bleibt:
+
+      export PLAYWRIGHT_BROWSERS_PATH=$WD/../pw-browsers && mkdir -p $PLAYWRIGHT_BROWSERS_PATH
+      python -m playwright install firefox webkit
+      python -m playwright install-deps webkit        # fehlende Systembibliotheken (apt, root), einmalig
+      ln -s /opt/pw-browsers/chromium* $PLAYWRIGHT_BROWSERS_PATH/   # nur wo es /opt/pw-browsers gibt
+
+  `browsers.py` findet `$WD/../pw-browsers` auch ohne Umgebungsvariable. Der Download braucht Netzwerkzugang zu den
+  Playwright-Download-Servern (in claude.ai meist nicht freigegeben) und `install-deps` braucht apt. Klappt eines
+  davon nicht: **trotzdem weitermachen** – `browsers.py` testet dann nur mit den verfügbaren Engines und der Bericht
+  sagt ausdrücklich, was nicht getestet wurde. `preflight.py` zeigt am Ende an, welche Engines bereitstehen.
+- **Firefox und Proxy-Zertifikat** (Cloud): Firefox nutzt einen eigenen Zertifikatsspeicher. `browsers.py` legt
+  dafür automatisch ein Profil an, das der Proxy-CA vertraut (`certutil`, Paket `libnss3-tools`). WebKit übernimmt
+  die System-Zertifikate. Nie die Zertifikatsprüfung abschalten.
 
 ## 0. Umgebung prüfen – immer zuerst
 
@@ -127,9 +147,82 @@ nohup python $S/viewports.py . > vp.out 2>&1 &    # rendert jede Seite in 375/76
 `check_links.py` prüft jedes Linkziel (intern und extern, mailto/tel, Sprungmarken) und unterscheidet
 «kaputt» von «nicht prüfbar» (Sandbox-Sperre, Bot-Schutz bei LinkedIn/Instagram).
 
-`viewports.py` misst pro Seite × Bildschirmgrösse horizontales Überlaufen (mit den verursachenden Elementen),
+`viewports.py` scrollt jede Seite einmal bis ganz nach unten (Lazy Loading) und misst dann pro Seite ×
+Bildschirmgrösse horizontales Überlaufen (mit den verursachenden Elementen),
 ob die Navigation erreichbar ist (öffnet Burger-Menüs selbst), kaputte Bilder, und macht Screenshots. Das ist
 der langsamste Schritt (Seiten × 3) – im Hintergrund laufen lassen.
+
+## 3b. Browser und Geräte
+
+Praktisch alle Browser laufen auf einer von drei Engines: **Chromium** (Chrome, Edge, Brave, Opera, Samsung
+Internet), **Gecko** (Firefox) und **WebKit** (Safari, und auf iPhone/iPad *jeder* Browser, auch Chrome und
+Firefox). Wer diese drei auf Desktop und Mobile prüft, deckt fast alle Besucher*innen ab.
+
+```bash
+nohup python $S/browsers.py . [--pages main|all] [--extra small,dark,slow,zoom,inapp] > br.out 2>&1 &
+python $S/browsers.py $WD --urls https://beispiel.ch/ https://beispiel.ch/fr/   # schnell, ohne Crawl
+```
+
+**Seiten:** Standard ist `--pages main` = Startseite pro Sprache, Testseiten der Formulare, Danke-Seiten und je eine
+Seite mit Teilen-Buttons (max. 25). Browser-Unterschiede hängen an Vorlagen, nicht an einzelnen Seiten; die
+Darstellung *aller* Seiten prüft schon `viewports.py`. `--pages all` nur bei kleinen Websites (Seiten × 7
+Kombinationen × ca. 10 s). Am besten **nach** Schritt 4 (Inventar) und 4b laufen lassen, dann kennt das Skript
+Formulare, Danke-Seiten und Teilen-Buttons.
+
+Standard-Kombinationen (in `config.json` → `browsers` als Liste von ids einschränkbar):
+
+| Browser | Gerät | Engine |
+|---|---|---|
+| Chrome/Edge | Desktop 1440 px | Chromium |
+| Chrome | Android (Pixel 7) | Chromium |
+| Firefox | Desktop 1440 px | Gecko |
+| Firefox | Android (412 px, Touch, UA – Playwright-Firefox kennt kein «isMobile») | Gecko |
+| Safari | macOS 1440 px | WebKit |
+| Safari | iPhone 15 | WebKit |
+| Safari | iPad | WebKit |
+
+Geprüft wird pro Seite × Kombination (nach einmaligem Scrollen bis ganz nach unten, wegen Lazy Loading):
+- lädt (Status), nicht abgefangene JavaScript-Fehler, fehlgeschlagene Ressourcen
+- kein horizontales Überlaufen (mit verursachenden Elementen) **und nichts links abgeschnitten** (Inhalt mit
+  negativer Position erzeugt keinen Scrollbalken und fällt sonst nicht auf), keine kaputten Bilder
+- Webfonts tatsächlich geladen (`document.fonts`, nur Schriften, die sichtbarer Text auch verwendet –
+  deklarierte, aber unbenutzte Schriften bleiben legitimerweise «unloaded»)
+- Sprachumschalter sichtbar und innerhalb der Bildschirmbreite (öffnet bei Bedarf das Burger-Menü)
+- Formulare (auch Tally/HubSpot im iframe): Felder sichtbar, ein Textfeld per Placeholder antippen und eintippen
+  (nie ein Auswahlfeld), Absende-Button innerhalb des Rahmens, iframe nicht zu niedrig – **nie abschicken**. Bei
+  Tally-Formularen mit aktiven «Teil-Antworten» wird nicht getippt (die würden sonst gespeichert).
+- Akkordeons/Tabs öffnen sich (erstes Element anklicken, Höhenänderung messen)
+- Teilen-Buttons sichtbar, innerhalb des Bildschirms und antippbar (nicht verdeckt)
+- Screenshot vom **ersten Bildschirm** (nicht ganzseitig – siehe Fehlalarme)
+
+Optionale Zusatztests mit `--extra` (für Kampagnenseiten empfohlen: `small,dark,slow`):
+- `small`: iPhone SE (375 × 667) und 320 px Breite: passt das Formular, bricht der Titel sauber um?
+- `dark`: `prefers-color-scheme: dark` und Chromiums automatisches Abdunkeln (wie Samsung Internet). Kontrast
+  wird gemessen; gemeldet wird nur, was im Dark Mode *schlechter* ist als hell
+- `slow`: 3G-Drosselung (nur Chromium, nur Seiten mit Formular): Zeit bis ein Formularfeld sichtbar ist (> 10 s = Befund)
+- `zoom`: Browser-Zoom 150 % und 200 % (= 960 bzw. 720 CSS-Pixel bei 1440 px Bildschirm): Überlaufen,
+  abgeschnittene Texte
+- `inapp`: User-Agent von Instagram, Facebook und LinkedIn (nur Annäherung, die echten App-Browser verhalten sich
+  teils anders, z.B. kein Pop-up für `mailto:`; WhatsApp öffnet Links im normalen Browser)
+
+`analyze.py` meldet in der Kategorie **«Browser»** nur, was in einer Engine scheitert und in einer anderen nicht
+(«Formular lädt nicht – nur Safari iPhone 15, Safari iPad»). Scheitert ein Test in *allen* Browsern einer
+Gerätegrösse, ist das kein Browserproblem: dann unter «Darstellung» (sofern nicht schon durch `viewports.py`
+abgedeckt). Zusatztests erscheinen mit ihrer Bedingung im Titel («– Chrome 320 px»), seltene Fälle (320 px, Zoom,
+App-Browser) mit tieferem Schweregrad.
+
+Im Bericht erscheint ein Abschnitt «Browser und Geräte» mit einer ✓/✗-Tabelle, Screenshots vom ersten
+Bildschirm nebeneinander und dem Hinweis auf die Grenzen. Nur diesen Teil als PDF (A4 quer):
+`python $S/report.py . out.pdf --only browser` (nach `analyze.py`).
+
+**Befunde selbst gegenprüfen**, bevor sie in den Bericht gehen: Ein Test, der nur in einer Engine scheitert, ist
+entweder ein echter Kompatibilitätsfehler oder ein Artefakt der Automatisierung. Im Zweifel die betroffene Seite in
+dieser Engine mit einem kurzen Playwright-Skript nachstellen und den Screenshot ansehen.
+
+**Grenzen offen benennen:** Getestet wird mit aktuellen Engines und Geräte-Emulation unter Linux. Echte Geräte,
+ältere Versionen (z.B. iOS 15/16), die Bildschirmtastatur über dem Formular und echte App-Browser lassen sich so
+nicht prüfen. Dafür braucht es einen Testdienst mit echten Geräten (BrowserStack, LambdaTest, mit Konto und
+Netzwerkfreigabe) oder einen kurzen Test von Hand auf einem iPhone und einem Android-Gerät.
 
 ## 4. Formulare – erst zeigen, dann echt abschicken
 
@@ -138,7 +231,10 @@ python $S/forms.py . inventory
 ```
 
 Bei eingebetteten Formularen (Tally, HubSpot …) liest das Inventar zusätzlich die Formular-Konfiguration und
-zeigt interne Weiterleitungsziele an («leitet evtl. weiter auf …/danke»). Diese Danke-Seiten kommen automatisch in
+zeigt interne Weiterleitungsziele an («leitet evtl. weiter auf …/danke»). **Tally** wird direkt aus der
+Konfiguration (`tally.so/r/<id>`) gelesen: sichtbare Felder, ob das Formular geschlossen ist, Formular-Sprache,
+«Teil-Antworten» und das Weiterleitungsziel – auch wenn es auf eine fremde oder Staging-Domain zeigt (z.B.
+`projekt.webflow.io/danke`, ein häufiger Fehler nach dem Go-live; dann wird das Live-Gegenstück geprüft). Diese Danke-Seiten kommen automatisch in
 die Crawl-Queue – auch wenn das Formular später nicht abgeschickt wird.
 
 Das Inventar fasst gleiche Formulare zusammen (ein Newsletter-Formular im Footer von 200 Seiten wird einmal
@@ -170,7 +266,7 @@ Wenn `forms.py` neue Seiten in die Queue gelegt hat, die Schritte 2 und 3 für d
 Skripte überspringen Bekanntes, das geht schnell):
 
 ```bash
-python $S/crawl.py . && python $S/check_links.py . && python $S/viewports.py .
+python $S/crawl.py . && python $S/check_links.py . && python $S/viewports.py . && python $S/browsers.py .
 ```
 
 ## 4b. Teilen-Links
@@ -222,13 +318,28 @@ Geprüft wird unter anderem:
 - **Rechtliches**: Impressum und Datenschutzerklärung pro Sprache vorhanden, erreichbar, in der richtigen
   Sprache und auf (fast) allen Seiten verlinkt
 - **Darstellung** und **Technik**: siehe Schritt 3, dazu nicht ladende Bilder/Skripte, JS-Fehler
+- **Browser**: siehe Schritt 3b
 
 **Dann die Befunde selbst durchsehen**, bevor der Bericht rausgeht – die Spracherkennung ist heuristisch.
 Typische Fehlalarme: Eigennamen und Kampagnennamen («Zürich», «Unia», Initiativtitel), Personennamen,
 bewusst deutsche Zitate; nicht übersetzte Texte in ausgeblendeten Vorlage-Elementen (im Browser prüfen, ob
 sichtbar – wenn nicht, als Hinweis «Platzhalter aufräumen» stehen lassen). Auch Links **innerhalb** von Texten
 prüfen, die die Automatik nicht als Rechtliches erkennt – z.B. «politique de protection des données» im
-Einwilligungstext des Formulars, der auf die deutsche Datenschutzerklärung zeigt. Im Zweifel die Screenshots in `screens/` ansehen. Fehlalarme und Ergänzungen in
+Einwilligungstext des Formulars, der auf die deutsche Datenschutzerklärung zeigt. Im Zweifel die Screenshots in `screens/` ansehen.
+
+Weitere typische Fehlalarme:
+- **Lazy Loading:** Bilder mit `loading="lazy"` (z.B. Social-Media-Icons im Footer) und iframes mit
+  `loading="lazy"` / `data-tally-src` haben vor dem Hinscrollen die Breite 0 bzw. sind noch nicht geladen. Die
+  Skripte scrollen vor der Messung nach unten; bei eigenen Nachprüfungen ebenso. Tally lädt erst, wenn der Rahmen
+  *im Bild ist* – wer schnell daran vorbeiscrollt, sieht nie ein Formular. Nie «unsichtbar» oder «lädt nicht»
+  melden, ohne das geprüft zu haben.
+- **Ganzseitige Screenshots** zeigen Elemente mit `position: fixed/sticky` (schwebende Buttons, Cookie-Banner) an
+  falscher Stelle über dem Inhalt. Überlappungen nur aus Screenshots vom ersten Bildschirm oder mit gemessenen
+  Positionen beim Scrollen melden.
+- **Testskript-Artefakte:** Ein geöffnetes Dropdown im Screenshot oder ein «nicht editierbares» Feld kommt oft
+  davon, dass das Skript in ein Auswahlfeld (combobox) statt in ein Textfeld getippt hat. Felder über den
+  Placeholder ansprechen und Tasten an das Feld selbst schicken (`locator.press_sequentially`), nicht an die Seite
+  – sonst kommt z.B. in Firefox bei iframes von fremden Domains kein Text an. Fehlalarme und Ergänzungen in
 `$WD/review.json` festhalten, dann `analyze.py` erneut laufen lassen:
 
 ```json
@@ -251,12 +362,12 @@ python $S/report.py . <ausgabe>/website-check-<domain>-<JJJJ-MM-TT>.html
 In der Cloud nach `/mnt/user-data/outputs/` schreiben und mit `present_files` übergeben; lokal in den
 aktuellen Ordner. Der Bericht ist eine einzelne HTML-Datei (Screenshots eingebettet) mit: Kennzahlen, Matrix
 Seite × Sprache (mit Punkten pro Bildschirmgrösse), Befunde nach Kategorie mit Filter nach Schweregrad und
-Sprache, Tabelle Impressum/Datenschutz, Formular-Ergebnisse, Teilen-Links, OG-Tabelle, Detail pro Seite, «Nicht prüfbar»
+Sprache, Tabelle Impressum/Datenschutz, Formular-Ergebnisse, Teilen-Links, Browser und Geräte, OG-Tabelle, Detail pro Seite, «Nicht prüfbar»
 und Vorgehen.
 
 Im Chat danach kurz zusammenfassen (Deutsch, Schweizer Schreibweise mit ss): die wichtigsten kritischen
-Befunde in zwei, drei Sätzen, was nicht geprüft werden konnte, und dass die Formular-Testeinträge beim Kunden
-gelöscht werden können. Den Bericht nicht im Chat nacherzählen.
+Befunde in zwei, drei Sätzen, was nicht geprüft werden konnte (auch: welche Browser-Engines fehlten), und – falls welche abgeschickt
+wurden – dass die Formular-Testeinträge beim Kunden gelöscht werden können. Den Bericht nicht im Chat nacherzählen.
 
 ## Wenn etwas nicht passt
 
@@ -273,6 +384,16 @@ gelöscht werden können. Den Bericht nicht im Chat nacherzählen.
   Browser. Die Skripte fallen automatisch auf ein vorhandenes Chromium zurück; sonst `CHROMIUM_PATH` setzen oder
   die zur Browser-Version passende Playwright-Version installieren. Nicht `playwright install` in der Cloud.
 - **`ERR_CERT_AUTHORITY_INVALID`** → siehe Schritt 0 (Proxy-CA in `~/.pki/nssdb`).
+- **Website hat sich während des Checks geändert** → `Last-Modified` bzw. `ETag` der Startseite zu Beginn notieren
+  (`curl -sI`; fehlen beide, einen Hash des HTML ohne Zähler/Nonces) und vor dem Bericht erneut prüfen. Hat er sich
+  geändert, den Check auf dem neuen Stand wiederholen (neuer Arbeitsordner) und im Bericht «Seit dem letzten Check
+  behoben» auflisten. Beim zweiten Durchgang manuelle Befunde aus `review.json` einzeln gegen den aktuellen Stand
+  prüfen, nicht einfach übernehmen.
+- **`ModuleNotFoundError: playwright`** → siehe Voraussetzungen (pip-Version passend zum Node-Playwright).
+- **WebKit startet nicht («missing dependencies»)** → `python -m playwright install-deps webkit`; geht das nicht,
+  ohne WebKit weitermachen (der Bericht vermerkt es).
+- **Firefox: `SEC_ERROR_UNKNOWN_ISSUER`** → Profil mit Proxy-CA: `certutil` installieren (`libnss3-tools`) und
+  `$WD/firefox-profile` löschen, dann `browsers.py` erneut starten.
 - **Formular-Test «Frame was detached»** (ältere Skriptversion) → das Formular hat nach dem Absenden die ganze
   Seite weitergeleitet, der Eintrag ist also meist angekommen. Nicht erneut abschicken, sondern das
   Weiterleitungsziel prüfen und `forms_results.json` von Hand korrigieren.

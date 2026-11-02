@@ -11,7 +11,7 @@ import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, unquote
 
 import requests
 
@@ -65,9 +65,11 @@ def main(wd):
                 results[raw] = {"result": "ok" if all(EMAIL.match(x.strip()) for x in addr.split(",") if x.strip())
                                 else "kaputt", "detail": "E-Mail-Adresse ungültig" if not EMAIL.match(addr) else ""}
             elif raw.lower().startswith("tel:"):
-                num = re.sub(r"[\s\-/().]", "", raw[4:])
-                results[raw] = {"result": "ok" if re.fullmatch(r"\+?\d{6,15}", num) else "kaputt",
-                                "detail": "" if re.fullmatch(r"\+?\d{6,15}", num) else "Telefonnummer ungültig"}
+                num = re.sub(r"[\s\-/().]", "", unquote(raw[4:]))  # tel:+41%2044%20… works on most devices
+                valid = bool(re.fullmatch(r"\+?\d{6,15}", num))
+                results[raw] = {"result": "ok" if valid else "kaputt", "detail": "" if valid else "Telefonnummer ungültig"}
+                if valid and "%" in raw:
+                    results[raw]["note"] = "Telefonnummer mit kodierten Leerzeichen (%20) – funktioniert meist, besser ohne Leerzeichen"
             elif h.startswith("http"):
                 n = normalize(h)
                 if n in pages and pages[n].get("status") is not None:

@@ -5,6 +5,7 @@ Usage: python preflight.py https://example.ch https://exemple.ch [...]
 Prints one line per host and exits 1 if any host is blocked by the sandbox proxy.
 """
 import os
+import re
 import sys
 from urllib.parse import urlsplit
 
@@ -36,6 +37,44 @@ def probe(host):
         return "fehler", f"Keine Verbindung: {msg[:120]}"
     except requests.exceptions.RequestException as e:
         return "fehler", str(e)[:160]
+
+
+def playwright_hint():
+    """Python-Playwright missing (Claude Code on the web ships only the Node version): install the *same*
+    version as the preinstalled Node-Playwright, otherwise it does not match the preinstalled Chromium."""
+    import subprocess
+    ver = ""
+    try:
+        out = subprocess.run(["npm", "ls", "-g", "playwright"], capture_output=True, text=True, timeout=20).stdout
+        m = re.search(r"playwright@(\d+\.\d+\.\d+)", out)
+        ver = m.group(1) if m else ""
+    except Exception:
+        pass
+    pin = f"=={ver}" if ver else ""
+    return ("Python-Paket «playwright» fehlt. Installieren mit\n"
+            f"    pip install playwright{pin} requests pillow\n"
+            + (f"  (Version {ver} = vorinstalliertes Node-Playwright, passt zum vorhandenen Chromium; "
+               "danach NICHT «playwright install chromium» ausführen.)" if ver else
+               "  Lokal danach einmalig: python -m playwright install chromium"))
+
+
+def engines_available():
+    """Firefox/WebKit for browsers.py – informational only, no exit code."""
+    from common import find_browsers_path
+    find_browsers_path(os.getcwd())
+    from playwright.sync_api import sync_playwright
+    res = {}
+    with sync_playwright() as p:
+        for name in ("firefox", "webkit"):
+            try:
+                getattr(p, name).launch().close()
+                res[name] = "ok"
+            except Exception as e:
+                msg = str(e)
+                res[name] = ("nicht installiert" if "Executable doesn't exist" in msg else
+                             "Systembibliotheken fehlen (python -m playwright install-deps " + name + ")"
+                             if "dependencies" in msg.lower() or "missing" in msg.lower() else msg.split("\n")[0][:120])
+    return res
 
 
 def resource_hosts(start_urls):
@@ -78,6 +117,11 @@ def main(args):
             if v not in hosts:
                 hosts.append(v)
     print(f"Umgebung: {'Cloud-Sandbox (claude.ai)' if in_sandbox() else 'lokal'}")
+    try:
+        import playwright  # noqa: F401
+    except ModuleNotFoundError:
+        print(playwright_hint())
+        sys.exit(1)
     blocked = []
     for h in hosts:
         status, detail = probe(h)
@@ -101,6 +145,11 @@ def main(args):
             print(f"{status:10} {h:40} {detail}")
         if not hosts_failed:
             print("ok         Seite lädt im Browser, keine blockierten Ressourcen")
+        eng = engines_available()
+        print("\nBrowsertest (browsers.py): Chromium ok, " +
+              ", ".join(f"{'Firefox' if k == 'firefox' else 'WebKit/Safari'} {v}" for k, v in eng.items()))
+        if any(v != "ok" for v in eng.values()):
+            print("  → Ohne Firefox/WebKit läuft browsers.py nur mit Chromium; Installation siehe SKILL.md (Voraussetzungen).")
     if blocked:
         print("\nBLOCKIERT – folgende Domains müssen in den Netzwerkeinstellungen erlaubt werden:")
         for h in blocked:

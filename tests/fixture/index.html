@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Testseite Browsertest</title>
+<style>
+body{margin:0;font:16px/1.5 sans-serif}
+header{display:flex;justify-content:space-between;padding:10px 20px}
+.lang a{margin-left:8px}
+.cols{width:280px;margin:0 auto}
+.col{width:340px;margin-left:-30px}  /* pushes text past the left edge on narrow screens, no scrollbar */
+form{max-width:400px;margin:20px}
+input,textarea{display:block;width:100%;margin:6px 0}
+</style></head><body>
+<header><strong>Test</strong><nav class="lang"><a href="/" hreflang="de">DE</a><a href="/fr/" hreflang="fr">FR</a></nav></header>
+<h1>Browsertest Testseite</h1>
+<div class="cols"><div class="col"><p id="cut">Dieser Text ragt links aus dem Bildschirm hinaus.</p></div></div>
+<details><summary>Frage 1</summary><p>Antwort mit etwas Text, damit sich die Höhe ändert.</p><p>Noch mehr Text.</p></details>
+<form action="/nie" onsubmit="document.title='ABGESCHICKT';return false">
+  <input type="text" name="vorname" placeholder="Vorname">
+  <input type="email" name="email" placeholder="E-Mail">
+  <button type="submit">Absenden</button>
+</form>
+<p><a href="https://api.whatsapp.com/send?text=Hallo%20https%3A%2F%2Fbeispiel.ch">Per WhatsApp teilen</a></p>
+<p><a href="tel:+41%2044%20000%2000%2000">Telefon</a></p>
+</body></html>
